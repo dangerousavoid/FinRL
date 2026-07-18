@@ -10,33 +10,13 @@ import pandas as pd
 from stable_baselines3 import A2C, DDPG, PPO, SAC, TD3
 
 from finrl.agents.stablebaselines3.models import DRLAgent
-from finrl.config import INDICATORS, TRAINED_MODEL_DIR
-from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+from finrl.config import TRAINED_MODEL_DIR
 from finrl.plot import backtest_stats
+
+from scripts.rl_env import INITIAL_AMOUNT, build_env
 
 MODEL_CLASSES = {"a2c": A2C, "ddpg": DDPG, "ppo": PPO, "td3": TD3, "sac": SAC}
 AGENT_NAMES = list(MODEL_CLASSES.keys())
-INITIAL_AMOUNT = 1_000_000
-
-
-def build_env(trade: pd.DataFrame) -> StockTradingEnv:
-    stock_dim = len(trade.tic.unique())
-    state_space = 1 + 2 * stock_dim + len(INDICATORS) * stock_dim
-    # turbulence_threshold=None: cripto não tem vix/turbulence
-    return StockTradingEnv(
-        df=trade,
-        turbulence_threshold=None,
-        hmax=100,
-        initial_amount=INITIAL_AMOUNT,
-        num_stock_shares=[0] * stock_dim,
-        buy_cost_pct=[0.001] * stock_dim,
-        sell_cost_pct=[0.001] * stock_dim,
-        state_space=state_space,
-        stock_dim=stock_dim,
-        tech_indicator_list=INDICATORS,
-        action_space=stock_dim,
-        reward_scaling=1e-4,
-    )
 
 
 def buy_and_hold(trade: pd.DataFrame) -> pd.DataFrame:

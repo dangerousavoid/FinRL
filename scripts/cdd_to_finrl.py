@@ -82,6 +82,7 @@ def main() -> None:
     p.add_argument("--resample", default=None,
                    help="regra pandas p/ reamostrar: 5min, 15min, 1h. Vazio = 1 minuto puro")
     p.add_argument("--train-out", default="train_data.csv")
+    p.add_argument("--val-out", default="val_data.csv")
     p.add_argument("--trade-out", default="trade_data.csv")
     args = p.parse_args()
 
@@ -98,13 +99,25 @@ def main() -> None:
     )
     processed = fe.preprocess_data(df)
 
+    # TRADE_END_DATE=None => usa a última data disponível (data_split é exclusivo
+    # no limite superior, então soma 1s à data máxima para incluir a última barra).
+    if config.TRADE_END_DATE is not None:
+        trade_end = config.TRADE_END_DATE
+    else:
+        max_dt = pd.to_datetime(processed["date"]).max() + pd.Timedelta(seconds=1)
+        trade_end = max_dt.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"TRADE_END_DATE não hard-coded — detectado dinamicamente: {trade_end}")
+
     train = data_split(processed, config.TRAIN_START_DATE, config.TRAIN_END_DATE)
-    trade = data_split(processed, config.TRADE_START_DATE, config.TRADE_END_DATE)
+    val = data_split(processed, config.VALIDATION_START_DATE, config.VALIDATION_END_DATE)
+    trade = data_split(processed, config.TRADE_START_DATE, trade_end)
 
     train.to_csv(args.train_out, index=False)
+    val.to_csv(args.val_out, index=False)
     trade.to_csv(args.trade_out, index=False)
-    print(f"train: {train.shape}  trade: {trade.shape}")
+    print(f"train: {train.shape}  val: {val.shape}  trade: {trade.shape}")
     print(f"período train: {train.date.min()} -> {train.date.max()}")
+    print(f"período val:   {val.date.min()} -> {val.date.max()}")
     print(f"período trade: {trade.date.min()} -> {trade.date.max()}")
 
 
