@@ -147,3 +147,8 @@ papertrading_test.py
 alpaca_processor_test.py
 /finrl/config_private.py
 .history/
+
+data/raw/
+results/
+trained_models/
+*.zip
