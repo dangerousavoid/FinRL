@@ -3,7 +3,8 @@ from __future__ import annotations
 import pandas as pd
 
 from finrl.config import INDICATORS
-from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+
+from scripts.risk_env import RiskAwareStockTradingEnv
 
 HMAX = 15
 INITIAL_AMOUNT = 1_000_000
@@ -29,5 +30,8 @@ def env_kwargs(df: pd.DataFrame) -> dict:
     )
 
 
-def build_env(df: pd.DataFrame) -> StockTradingEnv:
-    return StockTradingEnv(df=df, **env_kwargs(df))
+def build_env(df: pd.DataFrame) -> RiskAwareStockTradingEnv:
+    # RiskAwareStockTradingEnv (Fase 8.8): subclasse aditiva do StockTradingEnv
+    # que só sobrescreve o cálculo de recompensa; com RISK_LAMBDA=0 (default)
+    # reproduz exatamente o env original — seguro usar aqui incondicionalmente.
+    return RiskAwareStockTradingEnv(df=df, **env_kwargs(df))

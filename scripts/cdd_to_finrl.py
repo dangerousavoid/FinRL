@@ -74,13 +74,33 @@ def load_cdd(csv_path: str, tic: str = "BTCUSDT", resample: str | None = None) -
     return df[["date", "open", "high", "low", "close", "volume", "tic"]]
 
 
+# Fase 8.8: razões estacionárias. sma/mstd/atr crescem com o preço do BTC (que
+# foi de ~$5k em 2020 a dezenas de milhares hoje) — sem normalizar pelo close,
+# a rede vê uma feature em escala completamente diferente entre treino e trade
+# e não generaliza. Nomes de coluna ficam estáveis (sobrescritos in-place).
+_STATIONARY_RATIO_TO_CLOSE = ["close_24_sma", "close_168_sma", "atr_14", "close_24_mstd"]
+
+
+def _make_stationary(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for col in _STATIONARY_RATIO_TO_CLOSE:
+        if col not in df.columns:
+            continue
+        if col in ("close_24_sma", "close_168_sma"):
+            df[col] = df["close"] / df[col] - 1
+        else:  # atr_14, close_24_mstd
+            df[col] = df[col] / df["close"]
+    return df
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--csv", required=True,
                    help="arquivo CSV, pasta (ex.: data/raw) ou glob (ex.: 'data/raw/*.csv') da CryptoDataDownload")
     p.add_argument("--tic", default="BTCUSDT")
-    p.add_argument("--resample", default=None,
-                   help="regra pandas p/ reamostrar: 5min, 15min, 1h. Vazio = 1 minuto puro")
+    p.add_argument("--resample", default="1h",
+                   help="regra pandas p/ reamostrar: 5min, 15min, 1h (default deste experimento, Fase 8.8)."
+                        " Vazio ('') = 1 minuto puro")
     p.add_argument("--train-out", default="train_data.csv")
     p.add_argument("--val-out", default="val_data.csv")
     p.add_argument("--trade-out", default="trade_data.csv")
@@ -98,6 +118,7 @@ def main() -> None:
         user_defined_feature=False,
     )
     processed = fe.preprocess_data(df)
+    processed = _make_stationary(processed)
 
     # TRADE_END_DATE=None => usa a última data disponível (data_split é exclusivo
     # no limite superior, então soma 1s à data máxima para incluir a última barra).

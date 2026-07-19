@@ -31,9 +31,12 @@ def run_backtest(
     return strat_ret, bh_ret
 
 
-def _basic_metrics(name: str, ret: pd.Series, periods_per_year: float) -> dict:
-    """Métricas simples (sem quantstats), usadas de fallback quando a série de
-    retornos é degenerada (ex.: variância zero — quantstats/scipy quebram o R^2)."""
+def _basic_metrics(label: str, ret: pd.Series, periods_per_year: float) -> dict:
+    """Métricas simples (sem quantstats): retorno, vol., Sharpe aproximado e
+    maxDD. Servem de (a) fallback quando o relatório do quantstats quebra
+    (ex.: variância zero — comum num agente pouco treinado que nunca opera) e
+    (b) fonte do --metrics-out (Fase 8.8: comparação entre braços do ensemble
+    precisa de números, não do texto do relatório completo)."""
     cumulative = float((1 + ret).prod() - 1)
     vol = float(ret.std())
     ann_vol = vol * (periods_per_year**0.5)
@@ -42,12 +45,23 @@ def _basic_metrics(name: str, ret: pd.Series, periods_per_year: float) -> dict:
     equity = (1 + ret).cumprod()
     max_drawdown = float((equity / equity.cummax() - 1).min())
     return {
-        "estratégia": name,
+        "label": label,
         "retorno_acumulado": cumulative,
         "volatilidade_anualizada": ann_vol,
         "sharpe_aproximado": sharpe,
         "max_drawdown": max_drawdown,
     }
+
+
+def metrics_dataframe(strat: pd.Series, bh: pd.Series, periods_per_year: float) -> pd.DataFrame:
+    """DataFrame com uma linha 'estrategia' e uma 'buy_and_hold' — usado pelo
+    --metrics-out para comparação programática entre braços (Fase 8.8)."""
+    return pd.DataFrame(
+        [
+            _basic_metrics("estrategia", strat, periods_per_year),
+            _basic_metrics("buy_and_hold", bh, periods_per_year),
+        ]
+    )
 
 
 def report_metrics(strat: pd.Series, bh: pd.Series, periods_per_year: float) -> None:
@@ -58,8 +72,7 @@ def report_metrics(strat: pd.Series, bh: pd.Series, periods_per_year: float) -> 
         print(qs.reports.metrics(strat, benchmark=bh, mode="full", display=False))
     except Exception as e:  # noqa: BLE001 — degradação intencional, não é bug a propagar
         print(f"aviso: qs.reports.metrics falhou ({e}) — usando métricas básicas de fallback")
-        for name, ret in (("estratégia", strat), ("buy_and_hold", bh)):
-            print(_basic_metrics(name, ret, periods_per_year))
+        print(metrics_dataframe(strat, bh, periods_per_year))
 
 
 def save_tearsheet(strat: pd.Series, bh: pd.Series, out: str, title: str) -> None:
@@ -78,6 +91,9 @@ def main() -> None:
     p.add_argument("--fee", type=float, default=0.001, help="custo por unidade de turnover")
     p.add_argument("--to-daily", action="store_true", help="reamostra p/ diária antes das métricas")
     p.add_argument("--out", default="results/tearsheet.html")
+    p.add_argument("--metrics-out", default=None,
+                   help="opcional: caminho de um CSV com retorno/vol/Sharpe/maxDD de "
+                        "estrategia e buy_and_hold (Fase 8.8: comparação entre braços)")
     args = p.parse_args()
 
     trade = pd.read_csv(args.trade)
@@ -94,6 +110,10 @@ def main() -> None:
 
     report_metrics(strat, bh, periods_per_year)
     save_tearsheet(strat, bh, args.out, title="Estratégia DRL vs Buy & Hold (BTC)")
+
+    if args.metrics_out:
+        metrics_dataframe(strat, bh, periods_per_year).to_csv(args.metrics_out, index=False)
+        print(f"métricas (csv) salvas em {args.metrics_out}")
 
 
 if __name__ == "__main__":
