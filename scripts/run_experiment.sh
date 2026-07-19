@@ -17,8 +17,10 @@ export N_ENVS
 
 log() { echo "[run_experiment] $(date '+%Y-%m-%d %H:%M:%S') - $*"; }
 
-log "== (a) Começo limpo: removendo trained_models/* e results/* (preservando run.log em uso; NÃO mexe em data/raw/) =="
-rm -rf trained_models
+log "== (a) Começo limpo: esvaziando conteúdo de trained_models/ e results/ (preservando run.log em uso; NÃO mexe em data/raw/) =="
+# find -mindepth 1 -delete (não rm -rf): trained_models/ e results/ são volumes Docker
+# montados na VPS — remover o próprio diretório dá "Device or resource busy".
+find trained_models -mindepth 1 -delete 2>/dev/null || true
 mkdir -p trained_models
 # preserva run.log: é o próprio log deste script (redirecionado pelo nohup) e
 # apagá-lo no meio da escrita perderia o log quando o processo terminasse.
