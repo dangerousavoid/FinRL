@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # instala dependências primeiro, aproveitando cache de camadas
-COPY pyproject.toml poetry.lock* setup.py setup.cfg ./
+COPY pyproject.toml poetry.lock* setup.py setup.cfg README.md ./
 COPY finrl ./finrl
 RUN pip install --upgrade pip && pip install -e .
 
