@@ -2,6 +2,12 @@
 # Fase 8.6 — experimento sério: gera dados, calibra velocidade de treino,
 # dimensiona total_timesteps por orçamento de tempo, treina PPO, avalia em
 # validação e roda o backtest "pro" (Fase 8.5) contra buy-and-hold do BTC.
+#
+# FRESH=${FRESH:-0}: controla a etapa (a) "Começo limpo".
+#   FRESH=0 (default) — preserva trained_models/ e results/, permitindo que
+#                        o treino (etapa e) faça resume a partir do checkpoint.
+#   FRESH=1            — esvazia trained_models/ e results/ antes de começar
+#                        (preservando run.log; NÃO mexe em data/raw/).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -12,20 +18,27 @@ CSV_DIR="${CSV_DIR:-data/raw}"
 RESAMPLE="${RESAMPLE:-5min}"
 N_ENVS="${N_ENVS:-1}"  # nº de envs paralelos (SubprocVecEnv); 1 = caminho single-env (Codespace)
 RESULTS_DIR="results"
+FRESH="${FRESH:-0}"
 
 export N_ENVS
 
 log() { echo "[run_experiment] $(date '+%Y-%m-%d %H:%M:%S') - $*"; }
 
-log "== (a) Começo limpo: esvaziando conteúdo de trained_models/ e results/ (preservando run.log em uso; NÃO mexe em data/raw/) =="
-# find -mindepth 1 -delete (não rm -rf): trained_models/ e results/ são volumes Docker
-# montados na VPS — remover o próprio diretório dá "Device or resource busy".
-find trained_models -mindepth 1 -delete 2>/dev/null || true
-mkdir -p trained_models
-# preserva run.log: é o próprio log deste script (redirecionado pelo nohup) e
-# apagá-lo no meio da escrita perderia o log quando o processo terminasse.
-find "$RESULTS_DIR" -mindepth 1 ! -name 'run.log' -delete 2>/dev/null || true
-mkdir -p "$RESULTS_DIR"
+if [ "$FRESH" = "1" ]; then
+    log "== (a) Começo limpo (FRESH=1): esvaziando conteúdo de trained_models/ e results/ (preservando run.log em uso; NÃO mexe em data/raw/) =="
+    # find -mindepth 1 -delete (não rm -rf): trained_models/ e results/ são volumes Docker
+    # montados na VPS — remover o próprio diretório dá "Device or resource busy".
+    find trained_models -mindepth 1 -delete 2>/dev/null || true
+    mkdir -p trained_models
+    # preserva run.log: é o próprio log deste script (redirecionado pelo nohup) e
+    # apagá-lo no meio da escrita perderia o log quando o processo terminasse.
+    find "$RESULTS_DIR" -mindepth 1 ! -name 'run.log' -delete 2>/dev/null || true
+    mkdir -p "$RESULTS_DIR"
+else
+    log "== (a) FRESH=0: preservando trained_models/ e results/ para permitir resume =="
+    mkdir -p trained_models
+    mkdir -p "$RESULTS_DIR"
+fi
 
 START_TS=$(python -c 'import time; print(time.time())')
 
