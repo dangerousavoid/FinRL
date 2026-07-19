@@ -6,27 +6,37 @@ TRAINED_MODEL_DIR = "trained_models"
 TENSORBOARD_LOG_DIR = "tensorboard_log"
 RESULTS_DIR = "results"
 
-# date format: '%Y-%m-%d'
-TRAIN_START_DATE = "2014-01-06"
-TRAIN_END_DATE = "2025-12-31"
+# date format: '%Y-%m-%d %H:%M:%S' (timestamp completo — dados BTC intradiários)
+TRAIN_START_DATE = "2020-01-01 00:00:00"
+TRAIN_END_DATE = "2024-06-30 23:59:00"
+
+# Fase 8.6: janela de validação (walk-forward, entre treino e trade)
+VALIDATION_START_DATE = "2024-07-01 00:00:00"
+VALIDATION_END_DATE = "2025-06-30 23:59:00"
 
 TEST_START_DATE = "2026-01-01"
 TEST_END_DATE = "2026-03-20"
 
-TRADE_START_DATE = "2026-01-01"
-TRADE_END_DATE = "2026-03-20"
+TRADE_START_DATE = "2025-07-01 00:00:00"
+# None = detectado dinamicamente por scripts/cdd_to_finrl.py como a última data
+# disponível após concatenar os CSVs de data/raw/ — não deixar hard-coded aqui,
+# pois o histórico da CryptoDataDownload cresce a cada novo arquivo baixado.
+TRADE_END_DATE = None
 
 # stockstats technical indicator column names
 # check https://pypi.org/project/stockstats/ for different names
+# janelas em barras de 5min: 288 barras = 1 dia, 2016 barras = 1 semana
 INDICATORS = [
     "macd",
+    "rsi_30",
     "boll_ub",
     "boll_lb",
-    "rsi_30",
     "cci_30",
     "dx_30",
-    "close_30_sma",
-    "close_60_sma",
+    "close_288_sma",
+    "rsi_288",
+    "close_2016_sma",
+    "rsi_2016",
 ]
 
 

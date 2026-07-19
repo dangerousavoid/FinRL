@@ -1,0 +1,15 @@
+{
+  "name": "finrl-dev",
+  "image": "mcr.microsoft.com/devcontainers/python:3.10-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/node:1": { "version": "20" },
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+  },
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "customizations": {
+    "vscode": { "extensions": ["ms-python.python", "anthropic.claude-code"] }
+  },
+  "hostRequirements": { "cpus": 4, "memory": "8gb", "storage": "32gb" }
+}

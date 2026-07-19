@@ -147,3 +147,10 @@ papertrading_test.py
 alpaca_processor_test.py
 /finrl/config_private.py
 .history/
+
+data/raw/
+results/
+trained_models/
+*.zipdeploy_key
+deploy_key.pub
+deploy_key

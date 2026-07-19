@@ -1,0 +1,7 @@
+data/
+trained_models/
+results/
+.git/
+__pycache__/
+*.pyc
+.devcontainer/
