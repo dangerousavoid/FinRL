@@ -582,26 +582,98 @@ cd ~/finrl && docker compose ps && docker compose logs -f
 
 ---
 
-## FASE 7 — Operação do dia a dia
+## FASE 7 — Operação do dia a dia (receita prática)
 
-**Subir / derrubar** (na VPS ou local):
+Como rodar treinos na VPS sem depender da memória da conversa. Assume o setup pronto (VPS provisionada, Docker, ponte SSH, imagem entregue pelo CD, 7 CSVs em `~/finrl/data/raw`).
+
+### 7.1 Conectar na VPS (do Codespace)
+
 ```bash
-docker compose up -d      # sobe
-docker compose down       # derruba (libera recursos)
-docker compose logs -f    # logs ao vivo
-docker compose pull && docker compose up -d   # atualiza para a última imagem
+ssh -i deploy_key deploy@187.127.4.38
+cd ~/finrl
 ```
 
-**Ciclo de desenvolvimento:**
-1. Abra o Codespace, crie um branch, ajuste código/parâmetros.
-2. Rode/valide localmente no Codespace.
-3. Commit + push → CI valida no PR.
-4. Merge na `master` → CD publica imagem e faz deploy na VPS.
-5. Pare o Codespace para poupar cota.
+A chave `deploy_key` fica no Codespace (está no `.gitignore`, nunca vai para o Git). Se um dia recriar o Codespace, é preciso regenerar a chave e reautorizar (Fase 6.3).
 
-**Novos dados:** baixe um CSV atualizado da CryptoDataDownload, substitua em `data/raw/`, rode o adaptador e retreine. Para automatizar treinos periódicos, dá para adicionar um `schedule:` (cron) no workflow de Deploy.
+### 7.2 Rodar um treino sério (robusto, sobrevive a fechar o SSH)
+
+```bash
+nohup docker compose run --rm finrl > results/run.log 2>&1 &
+echo "PID: $!"
+tail -f results/run.log
+```
+
+- `nohup ... &` desacopla o treino do terminal — pode fechar o SSH que ele continua rodando na VPS (diferente do Codespace, a VPS **não tem idle timeout**).
+- `tail -f` acompanha o log ao vivo; **Ctrl+C sai só do tail**, não mata o treino.
+- Ao terminar, o log fecha com um RESUMO FINAL e gera `results/tearsheet.html`.
+
+> A 103 passos/s (N_ENVS=3), as 3 passadas completas (~1,4M passos) levam ~3h45. Ajuste o orçamento se quiser mais/menos (7.4).
+
+### 7.3 Teste de fumaça antes de um run longo (2 min)
+
+Sempre que mudar algo, valide o pipeline inteiro rapidinho antes de comprometer horas:
+
+```bash
+ORCAMENTO_SEG=120 docker compose run --rm finrl
+```
+
+O prefixo `ORCAMENTO_SEG=120` sobrepõe o teto só nesta execução (120 s). Se rodar do "Começo limpo" até o "RESUMO FINAL" sem erro, o caminho está saudável.
+
+### 7.4 Ajustar os parâmetros (os "botões")
+
+Três botões: `N_ENVS`, `ORCAMENTO_SEG`, `RESAMPLE`. Dois jeitos de girar:
+
+- **Temporário (um run só):** prefixo na linha de comando, ex.:
+  `RESAMPLE=15min ORCAMENTO_SEG=7200 docker compose run --rm finrl`
+- **Permanente:** edite o `docker-compose.yml` na VPS (bloco `environment:`) — vale para todos os runs seguintes.
+
+### 7.5 Começo limpo vs. retomar de checkpoint (atenção!)
+
+Comportamento atual do `run_experiment.sh`: a etapa "(a) Começo limpo" **esvazia `trained_models/` a cada run**, então cada execução **começa do zero** — e o "resume automático" nunca acha checkpoint (é o que o log mostra: *"Nenhum checkpoint encontrado — treinando do zero"*). Ou seja, hoje **resume e começo-limpo se anulam**.
+
+Para ter retomada real após uma queda (aproveitando os checkpoints salvos a cada 25k passos), o começo limpo precisa ser **opcional**. Correção recomendada (prompt para o Claude Code):
+
+> No scripts/run_experiment.sh, torne a etapa "(a) Começo limpo" condicional a uma variável `FRESH` (`${FRESH:-0}`): só esvaziar trained_models/ e results/ quando `FRESH=1`. Com `FRESH=0` (default), preservar os checkpoints para o resume funcionar. Documente no topo do script.
+
+Depois disso: `FRESH=1 docker compose run --rm finrl` para experimento novo; `docker compose run --rm finrl` (sem FRESH) para retomar de onde parou.
+
+### 7.6 Pegar os resultados para olhar
+
+Os artefatos ficam nos volumes montados da VPS (`~/finrl/results/` e `~/finrl/trained_models/`). Para ver o tear sheet, traga-o para o Codespace:
+
+```bash
+# NO CODESPACE:
+scp -i deploy_key deploy@187.127.4.38:~/finrl/results/tearsheet.html .
+```
+
+Depois clique no `tearsheet.html` no explorador do VS Code (ou use "Open with Live Server"). Os CSVs de resultado (`equity_comparison.csv`, `weights_ppo.csv`) vêm do mesmo jeito.
+
+### 7.7 Checar/parar um treino em andamento
+
+```bash
+docker compose ps          # o container 'finrl' está rodando?
+docker compose logs -f     # logs (se não estiver usando o run.log)
+docker compose down        # para e remove o container (interrompe o treino)
+```
+
+### 7.8 Ciclo para mudar código (o CI/CD na prática)
+
+Toda mudança de **código** segue o fluxo que já exercitamos:
+
+1. Ajuste no Codespace (você ou o Claude Code), num branch (`feat/...`).
+2. `git add ... && git commit -m "..." && git push` → o **CI** valida.
+3. Abra o Pull Request **apontando para `dangerousavoid/master`** (nunca `AI4Finance-Foundation`) e faça o **merge**.
+4. O merge dispara o **Deploy**, que reconstrói a imagem e a entrega na VPS.
+5. Na VPS: `docker compose pull` para pegar a imagem nova, e rode (7.2/7.3).
+
+Mudança só de **parâmetro** (N_ENVS, orçamento, resample) não precisa de deploy — é o 7.4.
+
+### 7.9 Novos dados
+
+Baixe CSVs atualizados da CDD, envie para `~/finrl/data/raw/` na VPS (o `tar`+`scp` da Fase 6.2) e rode de novo. Para treinos periódicos automáticos, dá para um workflow com `schedule:` (cron) que faz `docker compose run` via SSH — mantendo-o **fora** do fluxo de todo push.
 
 ---
+
 
 ## FASE 8 — Consumir o resultado: baseline honesto, métricas e inferência (2–3 h)
 
@@ -1072,6 +1144,32 @@ Regra de dimensionamento: **N_ENVS = nº de vCPUs − 1 ou 2** (deixe núcleos p
 > 3. A calibração deve medir throughput AGREGADO dos N envs.
 > 4. CheckpointCallback e resume continuam funcionando com o VecEnv.
 > Valide localmente com N_ENVS=2 num recorte pequeno e me mostre passos/s agregado vs single-env.
+
+---
+
+## FASE 8.8 — Aprendizado real: recompensa com risco, ensemble e timeframe 1h
+
+Diagnóstico da 8.6/8.7 + leitura do paper do FinRL: com um ativo só, recompensa de retorno puro e teste em bull market, "comprar e segurar" é a política ótima — o agente aprendeu exatamente o que pedimos. Para haver timing real, é preciso: (a) motivo matemático para sair (recompensa penalizando risco), (b) features de regime/volatilidade e volume no estado, (c) exploração, (d) teste contendo uma queda fora da amostra.
+
+### Decisões (e porquês)
+
+- **Timeframe 1h** (não 5min): sinal/ruído 12× melhor para fenômenos de dias/semanas; custos de giro deixam de dominar; ~57k linhas tornam ensemble+sementes+15 passadas viáveis na KVM 4. Diário (~2,4k barras) é pouco para DRL. 5min fica para refinar execução no futuro.
+- **Splits:** treino 2020-01-01→2023-12-31 (bear de 2022 DENTRO do treino), val 2024, teste 2025-01-01→fim (contém o crash ~30% de abr/2025 — prova de fogo out-of-sample).
+- **Recompensa (scripts/risk_env.py, subclasse do StockTradingEnv — aditivo):** `r = Δv − λ·ΔDD`, onde ΔDD = aumento do drawdown (pico − valor, só a parcela nova). λ via env var; λ=0 reproduz o env original (controle).
+- **INDICATORS (1h):** `macd, rsi_14, wr_14, atr_14, close_24_mstd, adx, vr_26, mfi_14, close_24_sma, close_168_sma` — cobre tendência, momentum, **volatilidade/regime** e **volume** (os dois buracos do set anterior). No adaptador, converter para razões estacionárias: `close/sma−1`, `atr/close`, `mstd/close`.
+- **Exploração:** `ent_coef=0.01` no PPO/A2C (default 0 = sem exploração → congela em buy-and-hold).
+- **Passadas:** 15 (≈525k passos/agente em ~35k linhas de treino). 2 sementes nos braços principais.
+- **Braços:** PPO-λ0 (controle/diagnóstico), PPO-λ, A2C-λ, SAC-λ (SAC no lugar do DDPG do paper: exploração por entropia, DDPG é frágil). SAC é off-policy: ~2–3× mais lento por passo em CPU.
+- **Ensemble (paper [51], versão estática):** escolher o braço com melhor Sharpe na VALIDAÇÃO; adicionalmente, comitê por média do contrato date→weight (via 8.5). Ambos reportados no teste.
+- **Critério de sucesso:** no crash de abr/2025 (teste), max drawdown do agente-λ visivelmente menor que buy-and-hold e que o controle-λ0, com a série de pesos mostrando redução de posição. Retorno total NÃO é o critério primário deste ciclo.
+
+### Orçamento estimado (KVM 4, N_ENVS=3)
+
+Em 1h de barra o env roda mais leve; PPO/A2C ~1–2h por braço, SAC ~3–5h. Total com sementes: uma noite (ORCAMENTO_SEG por braço: 14400, folga). Rodar via nohup + run.log (Fase 7.2), com FRESH=1 no primeiro braço.
+
+### Saídas
+
+`results/` com: métricas por braço (val e teste, reamostradas p/ diária), tearsheet do vencedor e do comitê, `weights_<braço>.csv`, e um `summary.csv` comparando retorno/Sharpe/maxDD de todos os braços vs buy-and-hold no teste.
 
 ---
 
