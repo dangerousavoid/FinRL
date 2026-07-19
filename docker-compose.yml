@@ -1,0 +1,14 @@
+services:
+  finrl:
+    image: ghcr.io/dangerousavoid/finrl:latest
+    command: ["bash", "scripts/run_experiment.sh"]
+    environment:
+      RESAMPLE: 5min          # granularidade dos dados
+      N_ENVS: 3               # envs paralelos (sua VPS tem 4 núcleos: 3 + 1 livre)
+      ORCAMENTO_SEG: 18000    # teto de tempo do treino, em segundos (5 horas)
+      TIC: BTCUSDT
+    volumes:
+      - ./data:/app/data                       # os 7 CSVs (montados, não embutidos)
+      - ./trained_models:/app/trained_models   # modelos e checkpoints
+      - ./results:/app/results                 # tearsheet, gráficos, log
+    restart: "no"             # tarefa "rodar e sair", não um serviço sempre ligado

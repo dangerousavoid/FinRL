@@ -6,16 +6,50 @@ import os
 import re
 
 import pandas as pd
+import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
 
 from finrl.config import PPO_PARAMS, RESULTS_DIR, TRAINED_MODEL_DIR
 from finrl.main import check_and_make_directories
 
-from scripts.rl_env import build_env
+from scripts.rl_env import build_env, env_kwargs
 
 CHECKPOINT_PREFIX = "ppo_checkpoint"
 CHECKPOINT_FREQ = 25_000
+N_ENVS = int(os.environ.get("N_ENVS", "1"))
+
+
+def make_env(train_df: pd.DataFrame, rank: int):
+    """Fábrica: cada processo do SubprocVecEnv recebe uma instância independente do env."""
+
+    def _init():
+        from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+
+        env = StockTradingEnv(df=train_df, **env_kwargs(train_df))
+        env.reset(seed=rank)
+        return env
+
+    return _init
+
+
+def build_vec_env(train_df: pd.DataFrame, n_envs: int):
+    if n_envs <= 1:
+        # caminho single-env (Codespace / debug) — sem regressão em relação ao anterior
+        e_train_gym = build_env(train_df)
+        env_train, _ = e_train_gym.get_sb_env()
+        return env_train
+    # evita o processo principal competir por núcleos com os N workers do SubprocVecEnv
+    # (só o processo principal roda a rede neural via torch; os workers só rodam o
+    # step() em pandas) — sem isso o ganho do paralelismo é corroído pela contenção de CPU.
+    torch.set_num_threads(1)
+    # start_method="fork": evita reimportar stable_baselines3 (e suas dependências
+    # pesadas, ex. cv2) em cada processo filho — default (forkserver/spawn) falha
+    # em containers Linux headless sem libGL. "fork" também é o mais rápido no Linux
+    # (destino real: Codespace/VPS), então não há trade-off aqui.
+    venv = SubprocVecEnv([make_env(train_df, i) for i in range(n_envs)], start_method="fork")
+    return VecMonitor(venv)  # preserva as métricas de episódio (ep_rew_mean etc.)
 
 
 def _latest_checkpoint(model_dir: str, prefix: str) -> tuple[str | None, int]:
@@ -46,8 +80,8 @@ def main() -> None:
 
     # NÃO usar set_index: o CSV (index=False) já produz o RangeIndex 0..N-1 que o env espera
     train = pd.read_csv(args.train)
-    e_train_gym = build_env(train)
-    env_train, _ = e_train_gym.get_sb_env()
+    print(f"N_ENVS={N_ENVS}")
+    env_train = build_vec_env(train, N_ENVS)
 
     ckpt_path, completed_steps = _latest_checkpoint(TRAINED_MODEL_DIR, args.checkpoint_prefix)
     remaining = max(args.total_timesteps - completed_steps, 0)
@@ -62,8 +96,11 @@ def main() -> None:
     if remaining == 0:
         print(f"total_timesteps ({args.total_timesteps:,}) já alcançado pelo checkpoint — pulando treino")
     else:
+        # CheckpointCallback conta n_calls (1 por env.step() vetorizado), não passos totais:
+        # com N_ENVS>1 cada call já vale N_ENVS passos, então dividimos para manter a
+        # cadência pretendida em passos totais (aviso oficial do SB3).
         callback = CheckpointCallback(
-            save_freq=args.checkpoint_freq,
+            save_freq=max(args.checkpoint_freq // N_ENVS, 1),
             save_path=TRAINED_MODEL_DIR,
             name_prefix=args.checkpoint_prefix,
         )

@@ -10,12 +10,11 @@ INITIAL_AMOUNT = 1_000_000
 TIC = "BTCUSDT"
 
 
-def build_env(df: pd.DataFrame) -> StockTradingEnv:
+def env_kwargs(df: pd.DataFrame) -> dict:
     stock_dim = len(df.tic.unique())
     state_space = 1 + 2 * stock_dim + len(INDICATORS) * stock_dim
     # turbulence_threshold=None: cripto não tem vix/turbulence
-    return StockTradingEnv(
-        df=df,
+    return dict(
         turbulence_threshold=None,
         hmax=HMAX,
         initial_amount=INITIAL_AMOUNT,
@@ -28,3 +27,7 @@ def build_env(df: pd.DataFrame) -> StockTradingEnv:
         action_space=stock_dim,
         reward_scaling=1e-4,
     )
+
+
+def build_env(df: pd.DataFrame) -> StockTradingEnv:
+    return StockTradingEnv(df=df, **env_kwargs(df))

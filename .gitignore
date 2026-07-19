@@ -151,4 +151,6 @@ alpaca_processor_test.py
 data/raw/
 results/
 trained_models/
-*.zip
+*.zipdeploy_key
+deploy_key.pub
+deploy_key

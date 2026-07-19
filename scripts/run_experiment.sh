@@ -5,12 +5,15 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-# ORÇAMENTO DE TEMPO PARA O TREINO PPO, em segundos. Editável.
-ORCAMENTO_SEG=10800  # 3 horas
+# ORÇAMENTO DE TEMPO PARA O TREINO PPO, em segundos. Editável (ou via env).
+ORCAMENTO_SEG="${ORCAMENTO_SEG:-10800}"  # 3 horas
 
 CSV_DIR="${CSV_DIR:-data/raw}"
 RESAMPLE="${RESAMPLE:-5min}"
+N_ENVS="${N_ENVS:-1}"  # nº de envs paralelos (SubprocVecEnv); 1 = caminho single-env (Codespace)
 RESULTS_DIR="results"
+
+export N_ENVS
 
 log() { echo "[run_experiment] $(date '+%Y-%m-%d %H:%M:%S') - $*"; }
 
@@ -31,11 +34,11 @@ python scripts/cdd_to_finrl.py --csv "$CSV_DIR" --tic BTCUSDT --resample "$RESAM
 N_LINHAS_TRAIN=$(($(wc -l < train_data.csv) - 1))
 log "train_data.csv: ${N_LINHAS_TRAIN} linhas"
 
-log "== (c) Calibração: 20.000 passos PPO descartáveis, cronometrando =="
+log "== (c) Calibração: 20.000 passos PPO descartáveis, cronometrando (N_ENVS=${N_ENVS}) =="
 CALIB_OUT=$(python scripts/calibrate.py --train train_data.csv --calib-steps 20000)
 echo "$CALIB_OUT"
 STEPS_PER_SECOND=$(echo "$CALIB_OUT" | grep -oP 'STEPS_PER_SECOND=\K[0-9.]+')
-log "calibração: ${STEPS_PER_SECOND} passos/segundo"
+log "calibração: ${STEPS_PER_SECOND} passos/segundo agregados (N_ENVS=${N_ENVS})"
 
 log "== (d) Calculando total_timesteps (orçamento de tempo vs. 3 passadas pelos dados) =="
 BUDGET_CALC=$(python - "$N_LINHAS_TRAIN" "$STEPS_PER_SECOND" "$ORCAMENTO_SEG" <<'PY'
@@ -62,7 +65,7 @@ if [ "$TOTAL_TIMESTEPS" -lt "$N_LINHAS_TRAIN" ]; then
     log "############################################################"
 fi
 
-log "== (e) Treinando PPO por ${TOTAL_TIMESTEPS} passos (checkpoint a cada 25k, resume automático) =="
+log "== (e) Treinando PPO por ${TOTAL_TIMESTEPS} passos (checkpoint a cada 25k, resume automático, N_ENVS=${N_ENVS}) =="
 python scripts/train.py --train train_data.csv --total-timesteps "$TOTAL_TIMESTEPS"
 
 log "== (f) Avaliando em val_data.csv =="

@@ -345,19 +345,20 @@ services:
   finrl:
     image: ghcr.io/SEU_USUARIO/finrl:latest   # trocar SEU_USUARIO
     build: .
+    command: ["bash", "scripts/run_experiment.sh"]   # orquestrador da 8.6/8.7
     environment:
-      CSV_PATH: /app/data/raw/btcusdt_1min.csv
+      RESAMPLE: 5min        # granularidade
+      N_ENVS: 6             # Opção A: envs paralelos (KVM 8 = 6; KVM 4 = 3)
+      ORCAMENTO_SEG: 18000  # teto de tempo do treino (5 h) — maior que no Codespace
       TIC: BTCUSDT
-      RESAMPLE: 1h          # vazio = 1 minuto puro; ou 5min / 15min / 1h
     volumes:
-      - ./data:/app/data                       # CSV grande fica AQUI (montado, não na imagem)
-      - ./trained_models:/app/trained_models   # modelos persistidos
-      - ./results:/app/results                 # gráficos/resultados
-    # para tarefa "rodar e sair" (batch de treino):
-    restart: "no"
+      - ./data:/app/data                       # os 7 CSVs ficam AQUI (montados, não na imagem)
+      - ./trained_models:/app/trained_models   # modelos/checkpoints persistidos
+      - ./results:/app/results                 # tearsheet/gráficos/log
+    restart: "no"           # tarefa "rodar e sair" (batch de treino)
 ```
 
-> **Importante:** o CSV de ~1 GB **nunca entra na imagem Docker** (senão o build fica gigante e a imagem impossível de publicar). Ele vive no diretório `data/` do host e é montado via volume. O `.dockerignore` (crie na raiz) deve conter `data/` para o `COPY . .` não arrastar o arquivo para a imagem:
+> **Importante:** os CSVs **nunca entram na imagem Docker** (senão o build fica gigante). Ficam no `data/` do host, montados via volume. O `.dockerignore` (raiz) deve conter `data/` para o `COPY . .` não arrastá-los:
 > ```
 > data/
 > trained_models/
@@ -467,7 +468,7 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy via SSH
+      - name: Enviar imagem para a VPS (SEM iniciar o treino)
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -476,10 +477,25 @@ jobs:
           script: |
             cd ~/finrl
             echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            docker compose pull
-            docker compose up -d
+            docker compose pull        # só baixa a última imagem; NÃO roda o treino
             docker image prune -f
 ```
+
+> **Por que NÃO `docker compose up` aqui:** o container é um **batch de treino de horas**, não um serviço web. Se o deploy o iniciasse, todo merge na `master` dispararia um treino novo — e o job do Actions tem limite de ~6 h, então nem caberia. A regra é: **CI valida, CD apenas publica e entrega a imagem; o treino é disparado deliberadamente na VPS.**
+
+### 5.3 Disparar o treino (deliberado, na VPS)
+
+Depois que o CD entregou a imagem, você inicia o treino quando quiser, direto na VPS, em segundo plano:
+
+```bash
+ssh deploy@IP_DA_VPS
+cd ~/finrl
+# roda e sai; logs no arquivo; sobrevive ao fechar o SSH:
+nohup docker compose run --rm finrl > results/run.log 2>&1 &
+tail -f results/run.log        # acompanhar (Ctrl+C só sai do tail)
+```
+
+Vantagem da VPS sobre o Codespace: **não há idle timeout**. O treino roda até acabar, e os artefatos (modelos, tearsheet) ficam nos volumes montados. Se quiser automatizar treinos periódicos, dá para criar um workflow separado com `workflow_dispatch` (botão "Run") ou `schedule:` (cron) que faz esse mesmo `docker compose run` via SSH — mantendo-o **fora** do fluxo automático de todo push.
 
 **Secrets a cadastrar** (repo → Settings → Secrets and variables → Actions):
 - `VPS_HOST` — IP da VPS
@@ -494,12 +510,16 @@ jobs:
 
 ### 6.1 Criar a VPS
 
-1. Em `https://www.hostinger.com/br/servidor-vps`, contrate um plano **KVM**. Com dados de 1 minuto, **memória importa mais que CPU**: carregar ~4M linhas no pandas e calcular indicadores consome vários GB de RAM.
-   - **Desenvolvendo com reamostragem (1h/15min) ou recorte:** KVM 2 (~2 vCPU / 8 GB) serve.
-   - **Rodando 1 minuto puro no histórico completo:** vá de **KVM 4 ou 8 (16–32 GB RAM)**. Mais vCPUs também encurtam o treino em CPU.
-2. Sistema operacional: **Ubuntu 24.04**. Se houver template com **Docker** pré-instalado, use-o (economiza a etapa 6.2).
-3. Provisione **disco suficiente**: o CSV bruto (~1 GB) + `train_data.csv`/`trade_data.csv` processados (que podem ficar maiores por causa das colunas de indicadores) + imagem Docker (>2 GB) + modelos. Reserve com folga (40 GB+).
+1. Em `https://www.hostinger.com/br/servidor-vps`, contrate um plano **KVM**. Para a **Opção A (treino paralelo em CPU — Fase 8.7)**, o que manda é **número de vCPUs**; RAM tem que acompanhar para as cópias de env. Specs atuais (verificados em 2026, promoções mudam):
+   - **KVM 8 — 8 vCPU / 32 GB / 400 GB NVMe (recomendado):** roda `N_ENVS=6` com folga de RAM. É o ponto ótimo para a Opção A.
+   - **KVM 4 — 4 vCPU / 16 GB / 200 GB NVMe (econômico):** roda `N_ENVS=3` — já um salto enorme sobre o 1 env do Codespace.
+   - KVM 2 (2 vCPU / 8 GB) só para testes leves; não vale para o treino sério.
+   - São KVM reais (AMD EPYC, NVMe, recursos **dedicados**), então os vCPUs são de fato seus — bom para paralelismo.
+2. Sistema operacional: **Ubuntu 24.04**. Datacenter **no Brasil** (menor latência). Se houver template com **Docker** pré-instalado, use-o (pula a 6.2).
+3. Disco: os 7 CSVs (~centenas de MB) + datasets processados + imagem Docker (>2 GB) + modelos/checkpoints. Os 200–400 GB dos planos KVM 4/8 sobram.
 4. Anote o **IP** e a senha root inicial.
+
+> Nada de GPU aqui: a Opção A é CPU-pura, então o Dockerfile CPU da Fase 4 serve como está (sem CUDA).
 
 ### 6.2 Preparar a VPS (via terminal SSH)
 
@@ -520,19 +540,19 @@ su - deploy
 mkdir -p ~/finrl && cd ~/finrl
 ```
 
-Copie para `~/finrl` na VPS o `docker-compose.yml`, o `.dockerignore` (não é obrigatório na VPS) e a pasta `data/` com o **CSV de minuto** (a imagem vem do GHCR, então o código-fonte não precisa estar lá):
+Copie para `~/finrl` na VPS o `docker-compose.yml` e a pasta `data/raw/` com os **7 CSVs anuais** (a imagem vem do GHCR, então o código-fonte não precisa estar lá). O jeito mais fácil é enviar **direto do Codespace**, onde os arquivos já estão:
 
 ```bash
-# do seu Codespace/máquina:
+# NO TERMINAL DO CODESPACE (os 7 CSVs já estão em data/raw/):
 scp docker-compose.yml deploy@IP_DA_VPS:~/finrl/
 
-# o CSV de ~1 GB: comprima antes para acelerar o upload
-gzip -c data/raw/btcusdt_1min.csv > btcusdt_1min.csv.gz
-scp btcusdt_1min.csv.gz deploy@IP_DA_VPS:~/finrl/
-ssh deploy@IP_DA_VPS "mkdir -p ~/finrl/data/raw && gunzip -c ~/finrl/btcusdt_1min.csv.gz > ~/finrl/data/raw/btcusdt_1min.csv"
+# comprima os 7 de uma vez e envie num arquivo só (upload mais confiável):
+tar czf btc_csvs.tgz -C data/raw .
+scp btc_csvs.tgz deploy@IP_DA_VPS:~/finrl/
+ssh deploy@IP_DA_VPS "mkdir -p ~/finrl/data/raw && tar xzf ~/finrl/btc_csvs.tgz -C ~/finrl/data/raw && rm ~/finrl/btc_csvs.tgz && ls -la ~/finrl/data/raw"
 ```
 
-> O CSV grande sobe **uma vez** para a VPS. Como está num volume montado, sobrevive a `docker compose down`/`up` e a novos deploys da imagem.
+> Os CSVs sobem **uma vez**. Como ficam num volume montado, sobrevivem a `docker compose down`/`up` e a novos deploys da imagem. (Da sua máquina Windows também dá: `scp` no PowerShell ou WinSCP — mas do Codespace é menos passo.)
 
 ### 6.3 Chave SSH para o GitHub Actions
 
@@ -994,6 +1014,64 @@ Um script orquestrador (`scripts/run_experiment.sh`) faz a calibração e dimens
 ### Execução autônoma (Claude Code)
 
 O prompt completo e copiável está no chat. Diferente das fases anteriores, este roda **sem aprovações**: o agente implementa tudo e escreve um único `scripts/run_experiment.sh` que encadeia dataset → calibração → treino (com orçamento de tempo) → validação → backtest 8.5, lançado em segundo plano com `nohup` e checkpoints/resume. No Claude Code, usar "auto-accept edits" (Shift+Tab) ou `claude --dangerously-skip-permissions` (seguro no sandbox do Codespace). Sem tocar em `finrl/`.
+
+---
+
+## FASE 8.7 — Treino paralelo em CPU (Opção A: escalar throughput sem GPU)
+
+Diagnóstico da 8.6: os **38 passos/s** no Codespace não vêm da rede neural — vêm do `step()` do ambiente (pandas), que roda em **CPU**. Logo, GPU ajudaria pouco; o ganho real vem de rodar **vários ambientes em paralelo** com `SubprocVecEnv` do stable-baselines3, um por núcleo. Numa VPS de 8 vCPUs isso pode dar ~6× o throughput — várias passadas completas dentro do orçamento de tempo, que é o que faltou na 8.6.
+
+Toda a mudança é em `scripts/` (o treino); **não** toca em `finrl/`.
+
+### 8.7.1 A mudança: fábrica de env + `SubprocVecEnv`
+
+O SB3 sobe N processos, cada um com uma cópia independente do env. PPO (on-policy) se beneficia diretamente: coleta rollouts dos N envs a cada iteração.
+
+```python
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
+
+def make_env(train_df, rank: int):
+    """Fábrica: cada processo recebe uma instância independente do StockTradingEnv."""
+    def _init():
+        from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+        env = StockTradingEnv(df=train_df, **ENV_KWARGS)   # turbulence_threshold=None etc.
+        env.reset(seed=rank)      # semente distinta por processo
+        return env
+    return _init
+
+def build_vec_env(train_df, n_envs: int):
+    if n_envs <= 1:
+        # caminho single-env (Codespace / debug)
+        return build_env(train_df)
+    venv = SubprocVecEnv([make_env(train_df, i) for i in range(n_envs)])
+    return VecMonitor(venv)       # VecMonitor preserva as métricas de episódio
+```
+
+No treino, o `total_timesteps` continua sendo o **total somado entre os envs** — então a mesma meta termina ~N× mais rápido (menos overhead). O `CheckpointCallback` e o resume da 8.6 seguem funcionando.
+
+### 8.7.2 Parametrização (para o compose controlar)
+
+`run_experiment.sh` e `train.py` devem ler variáveis de ambiente com defaults, para o `docker-compose.yml` ajustar sem rebuild:
+
+- `N_ENVS` (default 1 no Codespace; **6** na VPS KVM 8) — nº de envs paralelos.
+- `ORCAMENTO_SEG` (default 10800) — teto de tempo; na VPS dá para subir.
+- `RESAMPLE` (ex.: `5min`).
+
+Regra de dimensionamento: **N_ENVS = nº de vCPUs − 1 ou 2** (deixe núcleos para o processo principal e o SO). KVM 8 (8 vCPU) → `N_ENVS=6`. KVM 4 (4 vCPU) → `N_ENVS=3`.
+
+### 8.7.3 Duas armadilhas do paralelismo
+
+- **Memória.** Cada env carrega sua cópia do DataFrame de treino. Com 5 min (~473k linhas × 17 colunas) são ~centenas de MB por env; 6 envs cabem folgados nos 32 GB do KVM 8, mas **no Codespace (8 GB) não tente N_ENVS alto** — daria OOM. Por isso o default 1 no Codespace.
+- **Recalibrar.** Os passos/s da 8.6 foram medidos com 1 env. Na VPS, com N envs, o `--calibrate` precisa medir o throughput **agregado** (passos totais ÷ tempo) para o orçamento fazer a conta certa. É só rodar a calibração de novo na VPS.
+
+### 8.7.4 Prompt para o Claude Code
+
+> Leia CLAUDE.md e as Fases 8.6/8.7 de docs/plano_finrl_btc.md. Adicione treino paralelo (Opção A) SEM tocar em finrl/:
+> 1. Em train.py, crie `make_env(train_df, rank)` e `build_vec_env(train_df, n_envs)` usando SubprocVecEnv + VecMonitor; n_envs<=1 mantém o caminho single-env atual.
+> 2. `N_ENVS`, `ORCAMENTO_SEG` e `RESAMPLE` passam a ser lidos de variáveis de ambiente (com defaults; N_ENVS default 1).
+> 3. A calibração deve medir throughput AGREGADO dos N envs.
+> 4. CheckpointCallback e resume continuam funcionando com o VecEnv.
+> Valide localmente com N_ENVS=2 num recorte pequeno e me mostre passos/s agregado vs single-env.
 
 ---
 
