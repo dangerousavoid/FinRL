@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # instala dependências primeiro, aproveitando cache de camadas
 COPY pyproject.toml poetry.lock* setup.py setup.cfg README.md ./
 COPY finrl ./finrl
-RUN pip install --upgrade pip && pip install -e .
+RUN pip install --upgrade pip && pip install -e . && pip install quantstats
 
 # depois, o resto do código (scripts, config, etc.)
 COPY . .
