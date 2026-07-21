@@ -23,6 +23,9 @@
 # por braço.
 #
 # Variáveis de ambiente:
+#   ENV_KIND            espaço de ação repassado a train.py/signals.py como
+#                       --env: 'stocktrading' (default, cotas — Fase 8.8) ou
+#                       'target_weight' (Fase 8.9: ação contínua de fração-alvo)
 #   RESAMPLE            granularidade do adaptador (default: 1h, Fase 8.8)
 #   CSV_DIR             pasta com os CSVs brutos da CDD (default: data/raw)
 #   N_ENVS              nº de envs paralelos por braço (default: 1)
@@ -41,6 +44,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+ENV_KIND="${ENV_KIND:-stocktrading}"
 RESAMPLE="${RESAMPLE:-1h}"
 CSV_DIR="${CSV_DIR:-data/raw}"
 N_ENVS="${N_ENVS:-1}"
@@ -116,8 +120,8 @@ for branch in "${BRANCHES[@]}"; do
         TIMESTEPS_ARGS=(--total-timesteps "$TIMESTEPS_OVERRIDE")
     fi
 
-    log "-- (1) Treinando ${TAG} --"
-    python scripts/train.py --train train_data.csv --algo "$ALGO" --seed "$SEED" \
+    log "-- (1) Treinando ${TAG} (env=${ENV_KIND}) --"
+    python scripts/train.py --train train_data.csv --env "$ENV_KIND" --algo "$ALGO" --seed "$SEED" \
         --checkpoint-prefix "checkpoint_${TAG}" --model-name "agent_${TAG}" \
         "${TIMESTEPS_ARGS[@]}"
 
@@ -128,7 +132,7 @@ for branch in "${BRANCHES[@]}"; do
         TEARSHEET_OUT="${RESULTS_DIR}/tearsheet_${TAG}_${split}.html"
 
         log "-- (2) Contrato date->weight + backtest reamostrado p/ diária (${split}) --"
-        python scripts/signals.py --trade "$SPLIT_CSV" --agent "$ALGO" \
+        python scripts/signals.py --trade "$SPLIT_CSV" --env "$ENV_KIND" --agent "$ALGO" \
             --model-path "trained_models/agent_${TAG}" --out "$WEIGHTS_OUT"
         python scripts/backtest_pro.py --trade "$SPLIT_CSV" --weights "$WEIGHTS_OUT" \
             --fee 0.001 --to-daily --out "$TEARSHEET_OUT" --metrics-out "$METRICS_OUT"
