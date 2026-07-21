@@ -1171,6 +1171,48 @@ Em 1h de barra o env roda mais leve; PPO/A2C ~1–2h por braço, SAC ~3–5h. To
 
 `results/` com: métricas por braço (val e teste, reamostradas p/ diária), tearsheet do vencedor e do comitê, `weights_<braço>.csv`, e um `summary.csv` comparando retorno/Sharpe/maxDD de todos os braços vs buy-and-hold no teste.
 
+### Resultado da 8.8 (executado)
+
+- **UC01 (5min, 8.6/8.7):** agente colapsou em ~buy-and-hold (empate, +0,36% num bull). Validou pipeline + paralelismo (38→103 passos/s).
+- **8.8 λ=0.5:** todos os braços com risco colapsaram para **caixa** (peso 0). Recompensa de risco forte demais.
+- **8.8 varredura λ∈{0, 0.05, 0.1, 0.2} (PPO):** **penhasco tudo-ou-nada** — λ≤0.05 → segura tudo (peso 0.94); λ≥0.1 → foge (peso 0). Não há meio-termo estável.
+- O teste (jan/2025→jul/2026) foi de **queda** (BTC −32%); o controle acompanhou (−31%, maxDD −51%).
+
+---
+
+## FASE 8.9 — Correção pela AÇÃO (contínua) + protocolo honesto (guiado por pesquisa)
+
+Um levantamento cético do estado da arte (jul/2026) explicou nossos becos e reordenou a rota. Fontes-chave: Moody & Saffell 1998/2001; Zhang, Zohren & Roberts 2020 (arXiv 1911.10107); Hambly/Xu/Yang 2023; Sun/Wang/An 2023; Bailey & López de Prado 2014 / López de Prado 2018; Borrageiro et al. 2022; Bandarupalli 2025.
+
+### Achados que mudam o plano (decisões)
+
+- **D-A (a mais importante): a raiz do tudo-ou-nada é o ESPAÇO DE AÇÃO, não a recompensa.** O `StockTradingEnv` opera em **cotas** → decisões de canto. Correção: **ação contínua** de posição-alvo (`Box`). Só depois mexer na recompensa. Teste decisivo: se colapsar mesmo com ação contínua, aí sim a culpa é da recompensa.
+- **D-B: o colapso para buy-and-hold é o ótimo conhecido** em tendência de alta (não é bug). Timing de ativo único que bate B&H **não tem evidência robusta**; o caso "vencedor" em cripto é 71% *funding rate* (não timing spot). **Resultado honesto é entregável válido.**
+- **D-C: penalizar VARIÂNCIA, não drawdown absoluto.** Drawdown não é policy-invariant → penhasco (confirmado por nós). Usar **Sharpe diferencial** (Moody & Saffell) ou `μ−(λ/2)σ²`. Varredura de λ **logarítmica** (1e-5, 1e-4, 1e-3), não 0.05–0.2.
+- **D-D: custos realistas DESDE o treino** (~5–10 bps/giro; testar 5/10/25) + regularização de turnover. Sem isso, giro é ilusório.
+- **D-E: validação honesta obrigatória** — walk-forward + CPCV purgado/embargo; **5–10 sementes** (média±desvio); **Deflated Sharpe Ratio**; baseline sempre B&H líquido + momentum.
+- **D-F: features externas (Fear & Greed, on-chain, funding) só depois**, via ablação, point-in-time + embargo (look-ahead).
+- **D-G (alternativa se DRL não convergir):** RL imitativo (imitar oráculo ex-post) ou híbrido detecção-de-regime + volatility targeting.
+
+### Sequência de experimentos (reordenada pela evidência)
+
+1. **Ação contínua** de posição-alvo (`Box[0,1]`) — este passo. Isola o efeito do espaço de ação; recompensa segue sendo retorno (líquido de custos).
+2. Recompensa que penaliza variância (Sharpe diferencial / média-variância) + varredura log de λ.
+3. Custos desde o treino + regularização de turnover.
+4. (transversal) Protocolo de validação honesta (múltiplas sementes, DSR, walk-forward).
+5. Features externas por ablação. 6. Se nada convergir: alternativa D-G.
+
+### Experimento 1 — `scripts/target_weight_env.py` (novo, aditivo; não toca em `finrl/`)
+
+- Ação **contínua** `Box(0,1)` = fração-alvo do patrimônio em BTC (parametrizar p/ [−1,1] futuro).
+- A cada passo: ajusta exposição até `w_t`, aplica custo proporcional ao turnover `|w_t−w_{t-1}|` (default 10 bps, `COST_BPS`), avança uma barra.
+- Estado: mesmas INDICATORS + posição/caixa normalizados (compatível com `train.py`).
+- Recompensa: **só** Δv líquido de custos (sem penalização de risco ainda — isso é o passo 2).
+- `train.py`: flag `--env {stocktrading,target_weight}` (default sem regressão); mantém N_ENVS/checkpoints/resume/seeds.
+- `signals.py`: com env contínuo, o peso É a própria ação `w_t` (não reconstruído de cotas).
+- `run_ensemble.sh`: variável `ENV_KIND` (default stocktrading) repassada como `--env`.
+- **Smoke test decisivo:** rodar `--env=target_weight` num recorte pequeno e medir **desvio-padrão dos pesos**. Espalhados (0.3, 0.6, 0.8…) = ação contínua destravou o meio-termo. Colados em 0/1 = a raiz é a recompensa → ir ao passo 2.
+
 ---
 
 ## Checklist rápido

@@ -14,7 +14,7 @@ from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
 from finrl.config import A2C_PARAMS, PPO_PARAMS, RESULTS_DIR, SAC_PARAMS, TRAINED_MODEL_DIR
 from finrl.main import check_and_make_directories
 
-from scripts.rl_env import build_env
+from scripts.rl_env import ENV_KINDS, STOCKTRADING, build_env
 
 MODEL_CLASSES = {"ppo": PPO, "a2c": A2C, "sac": SAC}
 MODEL_PARAMS = {"ppo": PPO_PARAMS, "a2c": A2C_PARAMS, "sac": SAC_PARAMS}
@@ -26,23 +26,23 @@ N_ENVS = int(os.environ.get("N_ENVS", "1"))
 PASSADAS = float(os.environ.get("PASSADAS", "15"))
 
 
-def make_env(train_df: pd.DataFrame, rank: int, seed: int | None = None):
+def make_env(train_df: pd.DataFrame, rank: int, seed: int | None = None, env_kind: str = STOCKTRADING):
     """Fábrica: cada processo do SubprocVecEnv recebe uma instância independente do env."""
 
     def _init():
         from scripts.rl_env import build_env as _build_env
 
-        env = _build_env(train_df)
+        env = _build_env(train_df, env_kind=env_kind)
         env.reset(seed=(seed or 0) + rank)
         return env
 
     return _init
 
 
-def build_vec_env(train_df: pd.DataFrame, n_envs: int, seed: int | None = None):
+def build_vec_env(train_df: pd.DataFrame, n_envs: int, seed: int | None = None, env_kind: str = STOCKTRADING):
     if n_envs <= 1:
         # caminho single-env (Codespace / debug) — sem regressão em relação ao anterior
-        e_train_gym = build_env(train_df)
+        e_train_gym = build_env(train_df, env_kind=env_kind)
         if seed is not None:
             e_train_gym.reset(seed=seed)
         env_train, _ = e_train_gym.get_sb_env()
@@ -55,7 +55,10 @@ def build_vec_env(train_df: pd.DataFrame, n_envs: int, seed: int | None = None):
     # pesadas, ex. cv2) em cada processo filho — default (forkserver/spawn) falha
     # em containers Linux headless sem libGL. "fork" também é o mais rápido no Linux
     # (destino real: Codespace/VPS), então não há trade-off aqui.
-    venv = SubprocVecEnv([make_env(train_df, i, seed=seed) for i in range(n_envs)], start_method="fork")
+    venv = SubprocVecEnv(
+        [make_env(train_df, i, seed=seed, env_kind=env_kind) for i in range(n_envs)],
+        start_method="fork",
+    )
     return VecMonitor(venv)  # preserva as métricas de episódio (ep_rew_mean etc.)
 
 
@@ -77,6 +80,9 @@ def _latest_checkpoint(model_dir: str, prefix: str) -> tuple[str | None, int]:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--train", default="train_data.csv")
+    p.add_argument("--env", default=STOCKTRADING, choices=list(ENV_KINDS),
+                   help="espaço de ação: 'stocktrading' (default, cotas — sem regressão) "
+                        "ou 'target_weight' (Fase 8.9: ação contínua de fração-alvo)")
     p.add_argument("--algo", default="ppo", choices=list(MODEL_CLASSES))
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--total-timesteps", type=int, default=None,
@@ -95,8 +101,8 @@ def main() -> None:
     checkpoint_prefix = args.checkpoint_prefix or f"{args.algo}_checkpoint"
     model_name = args.model_name or f"agent_{args.algo}"
 
-    print(f"N_ENVS={N_ENVS}  algo={args.algo}  seed={args.seed}  total_timesteps={total_timesteps:,}")
-    env_train = build_vec_env(train, N_ENVS, seed=args.seed)
+    print(f"N_ENVS={N_ENVS}  env={args.env}  algo={args.algo}  seed={args.seed}  total_timesteps={total_timesteps:,}")
+    env_train = build_vec_env(train, N_ENVS, seed=args.seed, env_kind=args.env)
 
     model_cls = MODEL_CLASSES[args.algo]
     model_params = MODEL_PARAMS[args.algo]
