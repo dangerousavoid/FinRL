@@ -3,9 +3,12 @@
 # hiperparâmetros.
 #
 # Os braços são o produto cartesiano ALGOS x LAMBDA_GRID x SEEDS, com uma
-# exceção: LAMBDA=0 é o controle/diagnóstico (reproduz o env original) e só
+# exceção: quando LAMBDA_GRID tem pelo menos um lambda>0, LAMBDA=0 é o
+# controle/diagnóstico (reproduz o env original) coadjuvante da varredura e só
 # faz sentido rodar UMA vez, então só é gerado para o primeiro algo de ALGOS
-# e a primeira seed de SEEDS (evita repetir o mesmo controle à toa).
+# e a primeira seed de SEEDS (evita repetir o mesmo controle à toa). Se
+# LAMBDA_GRID tiver SOMENTE "0" (o controle é o próprio objeto do
+# experimento), essa exceção não se aplica e todas as seeds/algos geram braço.
 # Com os defaults (LAMBDA_GRID="0 0.5", ALGOS="ppo a2c sac", SEEDS="1") isso
 # gera 4 braços: ppo_l0_s1 (controle), ppo_l0.5_s1, a2c_l0.5_s1, sac_l0.5_s1.
 # (Note: são 4, não os 5 de antes — a 2ª seed do PPO saiu do hardcode; para
@@ -78,12 +81,24 @@ read -r -a SEEDS_ARR <<< "$SEEDS"
 FIRST_ALGO="${ALGOS_ARR[0]}"
 FIRST_SEED="${SEEDS_ARR[0]}"
 
+# A regra "controle (lambda=0) só na primeira seed/algo" só vale quando o
+# controle é coadjuvante de uma varredura, ou seja, há pelo menos um lambda>0
+# em LAMBDA_GRID. Se LAMBDA_GRID tiver só "0", o controle É o experimento e
+# deve gerar um braço por seed/algo, como qualquer outro lambda.
+HAS_LAMBDA_GT_0=0
+for LAMBDA in "${LAMBDA_ARR[@]}"; do
+    if [ "$LAMBDA" != "0" ]; then
+        HAS_LAMBDA_GT_0=1
+        break
+    fi
+done
+
 BRANCHES=()
 for ALGO in "${ALGOS_ARR[@]}"; do
     for LAMBDA in "${LAMBDA_ARR[@]}"; do
         for SEED in "${SEEDS_ARR[@]}"; do
-            if [ "$LAMBDA" = "0" ]; then
-                # controle: só uma vez (primeiro algo, primeira seed)
+            if [ "$LAMBDA" = "0" ] && [ "$HAS_LAMBDA_GT_0" = "1" ]; then
+                # controle coadjuvante de uma varredura: só uma vez (primeiro algo, primeira seed)
                 if [ "$ALGO" != "$FIRST_ALGO" ] || [ "$SEED" != "$FIRST_SEED" ]; then
                     continue
                 fi
