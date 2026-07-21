@@ -36,12 +36,20 @@ def _basic_metrics(label: str, ret: pd.Series, periods_per_year: float) -> dict:
     maxDD. Servem de (a) fallback quando o relatório do quantstats quebra
     (ex.: variância zero — comum num agente pouco treinado que nunca opera) e
     (b) fonte do --metrics-out (Fase 8.8: comparação entre braços do ensemble
-    precisa de números, não do texto do relatório completo)."""
+    precisa de números, não do texto do relatório completo).
+
+    Também inclui os ingredientes do Deflated Sharpe Ratio (Fase 8.9, passo 4
+    — Bailey & López de Prado 2014), calculados aqui porque exigem a série de
+    retornos por período (não disponível a partir do summary.csv agregado):
+    sharpe_bruto (Sharpe NÃO anualizado, por período), n_obs (nº de
+    observações/período T), assimetria (γ3) e curtose_pearson (γ4, normal=3,
+    convertida a partir da curtose em excesso do pandas)."""
     cumulative = float((1 + ret).prod() - 1)
     vol = float(ret.std())
     ann_vol = vol * (periods_per_year**0.5)
     mean_ret = float(ret.mean())
     sharpe = (mean_ret / vol) * (periods_per_year**0.5) if vol > 0 else float("nan")
+    sharpe_bruto = (mean_ret / vol) if vol > 0 else float("nan")
     equity = (1 + ret).cumprod()
     max_drawdown = float((equity / equity.cummax() - 1).min())
     return {
@@ -50,6 +58,10 @@ def _basic_metrics(label: str, ret: pd.Series, periods_per_year: float) -> dict:
         "volatilidade_anualizada": ann_vol,
         "sharpe_aproximado": sharpe,
         "max_drawdown": max_drawdown,
+        "sharpe_bruto": sharpe_bruto,
+        "n_obs": int(len(ret)),
+        "assimetria": float(ret.skew()),
+        "curtose_pearson": float(ret.kurt()) + 3.0,  # pandas: curtose em EXCESSO (normal=0)
     }
 
 

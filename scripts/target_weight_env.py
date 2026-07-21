@@ -25,9 +25,14 @@ class TargetWeightEnv(gym.Env):
          turnover |w_t − w_{t-1}| (default 10 bps, env var COST_BPS);
       3. avança UMA barra e mede a variação do patrimônio.
 
-    Recompensa: SÓ Δv líquido de custos (variação do patrimônio). Sem
-    penalização de risco — isso é o passo 2 da Fase 8.9. Determinístico dada a
-    seed. Sem VIX/turbulence (cripto).
+    Recompensa: selecionável via env var REWARD_KIND (Fase 8.9, passo 2):
+      - "return" (default, SEM regressão): Δv líquido de custos (variação do
+        patrimônio), como antes.
+      - "diff_sharpe": Sharpe diferencial de Moody & Saffell (1998), recompensa
+        incremental por passo baseada nas médias móveis exponenciais (taxa
+        ETA, default 0.01) do retorno líquido de custos e do seu quadrado.
+        Não aplica reward_scaling (já é uma quantidade adimensional pequena).
+    Determinístico dada a seed. Sem VIX/turbulence (cripto).
 
     Estado (observação): [caixa_norm, peso_atual] + INDICATORS (já processadas
     como razões estacionárias pelo cdd_to_finrl). Compatível com o formato que
@@ -41,6 +46,8 @@ class TargetWeightEnv(gym.Env):
 
     metadata = {"render.modes": ["human"]}
 
+    REWARD_KINDS = ("return", "diff_sharpe")
+
     def __init__(
         self,
         df: pd.DataFrame,
@@ -52,6 +59,8 @@ class TargetWeightEnv(gym.Env):
         action_high: float = 1.0,
         print_verbosity: int = 10,
         turnover_eps: float = 1e-6,
+        reward_kind: str | None = None,
+        eta: float | None = None,
     ):
         self.df = df
         self.tech_indicator_list = list(tech_indicator_list)
@@ -63,6 +72,13 @@ class TargetWeightEnv(gym.Env):
         self.action_high = float(action_high)
         self.print_verbosity = int(print_verbosity)
         self.turnover_eps = float(turnover_eps)
+        # Fase 8.9 passo 2: recompensa selecionável (default "return" == comportamento anterior)
+        self.reward_kind = (
+            os.environ.get("REWARD_KIND", "return") if reward_kind is None else reward_kind
+        )
+        if self.reward_kind not in self.REWARD_KINDS:
+            raise ValueError(f"REWARD_KIND desconhecido: {self.reward_kind!r} (use um de {self.REWARD_KINDS})")
+        self.eta = float(os.environ.get("ETA", "0.01")) if eta is None else float(eta)
 
         # ação CONTÍNUA de fração-alvo; parametrizável p/ [-1,1] no futuro (short)
         self.action_space = spaces.Box(
@@ -92,6 +108,35 @@ class TargetWeightEnv(gym.Env):
         self.rewards_memory: list[float] = []
         self.actions_memory: list[float] = []  # peso-alvo w_t efetivamente aplicado
         self.date_memory = [self._get_date()]
+        # Sharpe diferencial (Moody & Saffell): médias móveis exponenciais do
+        # retorno líquido de custos (A) e do seu quadrado (B); reiniciadas a
+        # cada episódio, como o resto do bookkeeping.
+        self._dsr_a = 0.0
+        self._dsr_b = 0.0
+
+    def _differential_sharpe_reward(self, net_return: float) -> float:
+        """Dt de Moody & Saffell (1998/2001), a partir do retorno líquido de
+        custos `net_return` (fração, não $) desta barra.
+
+            Dt = (B_{t-1}·ΔA_t − 0.5·A_{t-1}·ΔB_t) / (B_{t-1} − A_{t-1}²)^(3/2)
+
+        onde A_t = A_{t-1} + η·ΔA_t (ΔA_t = R_t − A_{t-1}) e, analogamente,
+        B_t = B_{t-1} + η·ΔB_t (ΔB_t = R_t² − B_{t-1}). O denominador é a
+        variância corrente elevada a 3/2; nos primeiros passos (variância
+        ainda não positiva) devolve 0.0 em vez de propagar um valor
+        instável/NaN.
+        """
+        a_prev, b_prev = self._dsr_a, self._dsr_b
+        delta_a = net_return - a_prev
+        delta_b = net_return * net_return - b_prev
+        variance = b_prev - a_prev * a_prev
+        if variance <= 1e-12:
+            dt = 0.0
+        else:
+            dt = (b_prev * delta_a - 0.5 * a_prev * delta_b) / (variance**1.5)
+        self._dsr_a = a_prev + self.eta * delta_a
+        self._dsr_b = b_prev + self.eta * delta_b
+        return float(dt)
 
     def _get_date(self):
         return self.data.date
@@ -171,10 +216,19 @@ class TargetWeightEnv(gym.Env):
         self.asset_memory.append(v_end)
         self.date_memory.append(self._get_date())
 
-        # recompensa: variação do patrimônio líquida de custos (sem risco)
-        reward = v_end - v_begin
-        self.rewards_memory.append(reward)
-        self.reward = reward * self.reward_scaling
+        # retorno líquido de custos desta barra (v_begin já reflete o turnover
+        # pago via v_after_cost, usado para dimensionar a posição)
+        net_return = (v_end - v_begin) / v_begin if v_begin > 0 else 0.0
+
+        if self.reward_kind == "diff_sharpe":
+            reward = self._differential_sharpe_reward(net_return)
+            self.rewards_memory.append(reward)
+            self.reward = reward  # já adimensional; reward_scaling não se aplica
+        else:
+            # recompensa: variação do patrimônio líquida de custos (sem risco)
+            reward = v_end - v_begin
+            self.rewards_memory.append(reward)
+            self.reward = reward * self.reward_scaling
 
         self.state = self._build_state()
         return self.state, self.reward, self.terminal, False, {}

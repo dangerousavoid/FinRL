@@ -29,9 +29,19 @@
 #   ENV_KIND            espaço de ação repassado a train.py/signals.py como
 #                       --env: 'stocktrading' (default, cotas — Fase 8.8) ou
 #                       'target_weight' (Fase 8.9: ação contínua de fração-alvo)
+#   REWARD_KIND         recompensa do target_weight_env.py (Fase 8.9, passo 2):
+#                       'return' (default, SEM regressão) ou 'diff_sharpe'
+#                       (Sharpe diferencial de Moody & Saffell). Só tem efeito
+#                       com ENV_KIND=target_weight (o env stocktrading usa
+#                       RISK_LAMBDA/risk_env.py, inalterado).
+#   ETA                 taxa de adaptação das médias móveis do Sharpe
+#                       diferencial (default 0.01, só usada se REWARD_KIND=diff_sharpe)
 #   RESAMPLE            granularidade do adaptador (default: 1h, Fase 8.8)
 #   CSV_DIR             pasta com os CSVs brutos da CDD (default: data/raw)
 #   N_ENVS              nº de envs paralelos por braço (default: 1)
+#   PASSADAS            repassada a scripts/train.py via os.environ (default lá:
+#                       15); esta rodada (Fase 8.9, passo 2) pede o dobro do
+#                       total_timesteps atual -> PASSADAS=30 (~1.05M passos/braço)
 #   FRESH               1 = esvazia trained_models/ e results/ antes do 1º
 #                       braço (preserva run.log); 0 (default) = preserva p/
 #                       permitir resume de um ensemble interrompido
@@ -40,25 +50,34 @@
 #                       Fase 8.8 do plano); vazio (default) = cada braço usa o
 #                       default de train.py (PASSADAS x linhas do train)
 #   LAMBDA_GRID         lista de RISK_LAMBDA separada por espaço p/ varrer
-#                       (default: "0 0.5")
+#                       (default: "0 0.5"); nesta rodada (recompensa já é
+#                       Sharpe diferencial) usar LAMBDA_GRID="0" (sem varredura
+#                       de lambda de drawdown)
 #   ALGOS               lista de algoritmos separada por espaço: ppo/a2c/sac
 #                       (default: "ppo a2c sac")
 #   SEEDS               lista de seeds separada por espaço (default: "1")
+#   MOM_WINDOW          janela (em barras) da média móvel do baseline de
+#                       momentum (Fase 8.9, passo 3; default 168 = ~1 semana
+#                       em barras de 1h)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 ENV_KIND="${ENV_KIND:-stocktrading}"
+REWARD_KIND="${REWARD_KIND:-return}"
+ETA="${ETA:-0.01}"
 RESAMPLE="${RESAMPLE:-1h}"
 CSV_DIR="${CSV_DIR:-data/raw}"
 N_ENVS="${N_ENVS:-1}"
+PASSADAS="${PASSADAS:-15}"
 FRESH="${FRESH:-0}"
 TIMESTEPS_OVERRIDE="${TIMESTEPS_OVERRIDE:-}"
 LAMBDA_GRID="${LAMBDA_GRID:-0 0.5}"
 ALGOS="${ALGOS:-ppo a2c sac}"
 SEEDS="${SEEDS:-1}"
+MOM_WINDOW="${MOM_WINDOW:-168}"
 RESULTS_DIR="results"
 
-export N_ENVS
+export N_ENVS PASSADAS REWARD_KIND ETA
 
 log() { echo "[run_ensemble] $(date '+%Y-%m-%d %H:%M:%S') - $*"; }
 
@@ -200,17 +219,34 @@ else
 fi
 
 log "############################################################"
-log "== (e) results/summary.csv: todos os braços + comitê (se houver) + buy-and-hold (no trade) =="
+log "== (e) Baseline de momentum (janela=${MOM_WINDOW} barras) no trade =="
+log "############################################################"
+MOM_WEIGHTS="${RESULTS_DIR}/weights_momentum_trade.csv"
+MOM_METRICS="${RESULTS_DIR}/metrics_momentum_trade.csv"
+python scripts/momentum_baseline.py --trade trade_data.csv --window "$MOM_WINDOW" --out "$MOM_WEIGHTS"
+python scripts/backtest_pro.py --trade trade_data.csv --weights "$MOM_WEIGHTS" \
+    --fee 0.001 --to-daily --out "${RESULTS_DIR}/tearsheet_momentum.html" --metrics-out "$MOM_METRICS"
+
+log "############################################################"
+log "== (f) results/summary.csv: todos os braços + comitê (se houver) + momentum + buy-and-hold (no trade) =="
 log "############################################################"
 SUMMARY_BRANCHES_ARGS=("${TRADE_SUMMARY_ARGS[@]}")
 if [ "$COMITE_FEITO" -eq 1 ]; then
     SUMMARY_BRANCHES_ARGS+=("comite=${COMITE_METRICS}=${COMITE_WEIGHTS}")
 fi
+SUMMARY_BRANCHES_ARGS+=("momentum=${MOM_METRICS}=${MOM_WEIGHTS}")
 python scripts/ensemble_select.py summary \
     --branches "${SUMMARY_BRANCHES_ARGS[@]}" \
     --out "${RESULTS_DIR}/summary.csv"
 
-log "== Concluído. Ver ${RESULTS_DIR}/summary.csv =="
+log "############################################################"
+log "== (g) results/summary_by_algo.csv: média±desvio do Sharpe/retorno entre sementes, por algoritmo =="
+log "############################################################"
+python scripts/ensemble_select.py aggregate \
+    --summary "${RESULTS_DIR}/summary.csv" \
+    --out "${RESULTS_DIR}/summary_by_algo.csv"
+
+log "== Concluído. Ver ${RESULTS_DIR}/summary.csv e ${RESULTS_DIR}/summary_by_algo.csv =="
 if [ "$TEARSHEET_VENCEDOR_FEITO" -eq 1 ]; then
     log "== e ${RESULTS_DIR}/tearsheet_vencedor.html =="
 fi

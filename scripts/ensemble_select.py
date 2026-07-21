@@ -8,19 +8,66 @@ Subcomandos:
                  braços de risco (lambda>0) colapsados (peso ~0, retorno 0,
                  Sharpe NaN); imprime só o rótulo (stdout)
   peso-medio  -- imprime o peso médio (mean, não abs) de um CSV date->weight
-  summary     -- concatena métricas de trade de vários braços (+ 1 buy_and_hold)
-                 num único results/summary.csv, com a coluna peso_medio_trade
+  summary     -- concatena métricas de trade de vários braços (+ baselines:
+                 buy_and_hold, momentum, comite) num único results/summary.csv,
+                 com peso_medio_trade, dsr e prob_sharpe>0 (Fase 8.9, passo 4)
+  aggregate   -- lê summary.csv e agrega por algoritmo (média±desvio do Sharpe
+                 e do retorno entre sementes) — Fase 8.9, passo 5
 """
 from __future__ import annotations
 
 import argparse
 import sys
+from math import e as euler_e
+from math import sqrt
 
+import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
 # Abaixo desse limiar, retorno_acumulado/peso_medio são tratados como "zero"
 # (braço colapsado: parou de operar). Sharpe NaN sozinho já basta.
 COLLAPSE_EPS = 1e-6
+
+# Rótulos reservados que NÃO são "tentativas" de busca de hiperparâmetros
+# (são baselines/derivados) -- excluídos do cálculo de SR0 (Fase 8.9, passo 4)
+# e do agrupamento por algoritmo (passo 5).
+BASELINE_LABELS = {"buy_and_hold", "momentum", "comite"}
+
+EULER_MASCHERONI = 0.5772156649015329  # γ
+
+
+def expected_max_sharpe(n_trials: int, sharpe_estimates: list[float]) -> float:
+    """SR0*: Sharpe esperado sob H0 ao escolher o melhor dentre `n_trials`
+    tentativas independentes (Bailey & López de Prado 2014, eq. da teoria de
+    valores extremos), usando a variância cross-sectional dos Sharpes
+    observados nesta rodada como proxy de Var[SR_n]. Com <2 tentativas válidas
+    (sem dispersão para estimar), devolve 0.0 -- degenera para PSR(0)."""
+    valid = [s for s in sharpe_estimates if pd.notna(s)]
+    if n_trials <= 1 or len(valid) < 2:
+        return 0.0
+    var_sr = float(np.var(valid, ddof=1))
+    if var_sr <= 0:
+        return 0.0
+    z1 = norm.ppf(1 - 1.0 / n_trials)
+    z2 = norm.ppf(1 - 1.0 / (n_trials * euler_e))
+    return sqrt(var_sr) * ((1 - EULER_MASCHERONI) * z1 + EULER_MASCHERONI * z2)
+
+
+def probabilistic_sharpe_ratio(sharpe_bruto: float, sharpe_threshold: float, n_obs: int,
+                                skew: float, kurtosis_pearson: float) -> float:
+    """PSR(SR*) (Bailey & López de Prado 2014): probabilidade de o Sharpe
+    (NÃO anualizado) observado exceder `sharpe_threshold`, corrigindo pelo nº
+    de observações e pela não-normalidade (assimetria/curtose) dos retornos.
+    Com <2 observações ou denominador não-positivo, devolve NaN (dado
+    insuficiente para a estimativa)."""
+    if pd.isna(sharpe_bruto) or n_obs <= 1:
+        return float("nan")
+    denom = 1 - skew * sharpe_bruto + ((kurtosis_pearson - 1) / 4.0) * sharpe_bruto**2
+    if denom <= 0:
+        return float("nan")
+    z = (sharpe_bruto - sharpe_threshold) * sqrt(n_obs - 1) / sqrt(denom)
+    return float(norm.cdf(z))
 
 
 def mean_weight(weights_path: str) -> float:
@@ -105,7 +152,8 @@ def build_summary(
     braços, pois é o mesmo benchmark — pega a do primeiro arquivo). Adiciona a
     coluna 'peso_medio_trade' (mean, não abs) a partir do weights de trade de
     cada braço -- NaN para buy_and_hold (sem weights próprio) e para rótulos
-    sem entrada em weights_by_label."""
+    sem entrada em weights_by_label. Também adiciona 'dsr' e 'prob_sharpe>0'
+    (Fase 8.9, passo 4) via _add_dsr_columns."""
     weights_by_label = weights_by_label or {}
     rows = []
     bh_added = False
@@ -121,7 +169,57 @@ def build_summary(
             bh["peso_medio_trade"] = float("nan")
             rows.append(bh)
             bh_added = True
-    return pd.DataFrame(rows)
+    summary = pd.DataFrame(rows)
+    _add_dsr_columns(summary)
+    return summary
+
+
+def _add_dsr_columns(summary: pd.DataFrame) -> None:
+    """Adiciona, in-place, as colunas 'dsr' e 'prob_sharpe>0' (Fase 8.9, passo
+    4 -- Bailey & López de Prado 2014). SR0 (Sharpe esperado por acaso ao
+    escolher o melhor dentre várias tentativas) é estimado a partir da
+    dispersão de sharpe_bruto entre as tentativas de busca desta rodada
+    (rótulos fora de BASELINE_LABELS); N = nº dessas tentativas ("número de
+    braços desta rodada"). dsr = PSR(SR0) (corrige Sharpe>SR0 por múltiplas
+    comparações); prob_sharpe>0 = PSR(0) (só corrige por amostra finita e
+    não-normalidade, sem a correção de múltiplas comparações)."""
+    if "sharpe_bruto" not in summary.columns:
+        summary["dsr"] = float("nan")
+        summary["prob_sharpe>0"] = float("nan")
+        return
+
+    trial_mask = ~summary["label"].isin(BASELINE_LABELS)
+    n_trials = int(trial_mask.sum())
+    sr0 = expected_max_sharpe(n_trials, summary.loc[trial_mask, "sharpe_bruto"].tolist())
+    print(f"DSR: n_trials={n_trials}  SR0(esperado por acaso)={sr0:.4f}", file=sys.stderr)
+
+    dsr_vals, psr0_vals = [], []
+    for _, row in summary.iterrows():
+        sharpe_bruto = row.get("sharpe_bruto", float("nan"))
+        n_obs_raw = row.get("n_obs", float("nan"))
+        n_obs = int(n_obs_raw) if pd.notna(n_obs_raw) else 0
+        skew = row.get("assimetria", 0.0)
+        kurt = row.get("curtose_pearson", 3.0)
+        dsr_vals.append(probabilistic_sharpe_ratio(sharpe_bruto, sr0, n_obs, skew, kurt))
+        psr0_vals.append(probabilistic_sharpe_ratio(sharpe_bruto, 0.0, n_obs, skew, kurt))
+    summary["dsr"] = dsr_vals
+    summary["prob_sharpe>0"] = psr0_vals
+
+
+def aggregate_by_algo(summary: pd.DataFrame) -> pd.DataFrame:
+    """Fase 8.9, passo 5: agrega o summary por algoritmo (extraído do rótulo
+    '<algo>_l<lambda>_s<seed>' -> prefixo antes de '_l'), reportando
+    média±desvio do Sharpe e do retorno entre as sementes -- para julgar
+    robustez/dispersão do algoritmo, não só o braço vencedor pontual."""
+    trial = summary.loc[~summary["label"].isin(BASELINE_LABELS)].copy()
+    trial["algo"] = trial["label"].str.split("_l", n=1).str[0]
+    return trial.groupby("algo").agg(
+        n_sementes=("label", "count"),
+        sharpe_medio=("sharpe_aproximado", "mean"),
+        sharpe_desvio=("sharpe_aproximado", "std"),
+        retorno_medio=("retorno_acumulado", "mean"),
+        retorno_desvio=("retorno_acumulado", "std"),
+    ).reset_index()
 
 
 def _parse_labeled(items: list[str], n_fields: int = 2) -> list[tuple[str, ...]]:
@@ -160,6 +258,10 @@ def main() -> None:
                             help="'rotulo=metrics.csv=weights.csv' (trade), um por braço")
     p_summary.add_argument("--out", required=True)
 
+    p_aggregate = sub.add_parser("aggregate", help="agrega o summary.csv por algoritmo (média±desvio entre sementes)")
+    p_aggregate.add_argument("--summary", required=True)
+    p_aggregate.add_argument("--out", required=True)
+
     args = p.parse_args()
 
     if args.cmd == "committee":
@@ -178,6 +280,12 @@ def main() -> None:
         summary.to_csv(args.out, index=False)
         print(f"summary salvo em {args.out}")
         print(summary.to_string(index=False))
+    elif args.cmd == "aggregate":
+        summary = pd.read_csv(args.summary)
+        agg = aggregate_by_algo(summary)
+        agg.to_csv(args.out, index=False)
+        print(f"agregado por algoritmo salvo em {args.out}")
+        print(agg.to_string(index=False))
 
 
 if __name__ == "__main__":
